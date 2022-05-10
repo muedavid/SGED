@@ -13,15 +13,9 @@ def number_true_false_positive_negative(y_true, y_prediction, threshold_edge_wid
     number_true_positive = tf.reduce_sum(y_true_widen * tf.cast((y_true_widen == y_prediction), tf.int32))
     number_false_positive = tf.reduce_sum(y_prediction, axis=(0, 1, 2, 3)) - number_true_positive
 
-    number_true_negative = tf.reduce_sum((1 - y_true_widen) * tf.cast((y_true_widen == y_prediction), tf.int32))
+    number_true_negative = tf.reduce_sum((1 - y_true) * tf.cast((y_true == y_prediction), tf.int32))
+    number_false_negative = tf.reduce_sum(1 - y_prediction) - number_true_negative
 
-    # if threshold_edge_with > 0 a band around the true edges are secured. Thus, in there all pixels which are true are
-    # considered to be true positive. Thus, the negative pixels in this band are also not considered in the calculation
-    # of false negative
-    if threshold_edge_width > 0:
-        number_false_negative = tf.reduce_sum((1 - y_prediction) * (1 - y_true_widen)) - number_true_negative
-    else:
-        number_false_negative = tf.reduce_sum(1 - y_prediction) - number_true_negative
     return number_true_positive, number_false_positive, number_true_negative, number_false_negative
 
 
