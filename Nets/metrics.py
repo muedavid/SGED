@@ -6,15 +6,21 @@ def number_true_false_positive_negative(y_true, y_prediction, threshold_edge_wid
     # widen the edges for the calculation of the number of true positive
     kernel = tf.ones([1 + 2 * threshold_edge_width, 1 + 2 * threshold_edge_width, y_prediction.shape[-1], 1],
                      tf.float32)
-    y_true_widen = tf.cast(y_true, tf.float32)
-    y_true_widen = tf.nn.depthwise_conv2d(y_true_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
-    y_true_widen = tf.cast(tf.clip_by_value(y_true_widen, 0, 1), tf.int32)
+    y_prediction_widen = tf.cast(y_prediction, tf.float32)
+    y_prediction_widen = tf.nn.depthwise_conv2d(y_prediction_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
+    y_prediction_widen = tf.cast(tf.clip_by_value(y_prediction_widen, 0, 1), tf.int32)
 
-    number_true_positive = tf.reduce_sum(y_true_widen * tf.cast((y_true_widen == y_prediction), tf.int32))
+    if tf.reduce_sum(y_prediction) >= tf.reduce_sum(y_true):
+        number_true_positive = tf.reduce_sum(tf.cast((y_true & y_prediction_widen), tf.int32))
+    else:
+        y_true_widen = tf.cast(y_true, tf.float32)
+        y_true_widen = tf.nn.depthwise_conv2d(y_true_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
+        y_true_widen = tf.cast(tf.clip_by_value(y_true_widen, 0, 1), tf.float32)
+        number_true_positive = tf.reduce_sum(tf.cast((y_true_widen & y_prediction), tf.int32))
     number_false_positive = tf.reduce_sum(y_prediction, axis=(0, 1, 2, 3)) - number_true_positive
 
-    number_true_negative = tf.reduce_sum((1 - y_true) * tf.cast((y_true == y_prediction), tf.int32))
-    number_false_negative = tf.reduce_sum(1 - y_prediction) - number_true_negative
+    number_true_negative = tf.reduce_sum(tf.cast((1 - y_true) & (1 - y_prediction_widen), tf.int32))
+    number_false_negative = tf.reduce_sum((1 - y_prediction_widen)) - number_true_negative
 
     return number_true_positive, number_false_positive, number_true_negative, number_false_negative
 
