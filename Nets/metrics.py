@@ -1,4 +1,5 @@
 import tensorflow as tf
+import Nets.tools as tools
 
 
 @tf.function
@@ -10,17 +11,18 @@ def number_true_false_positive_negative(y_true, y_prediction, threshold_edge_wid
     y_prediction_widen = tf.nn.depthwise_conv2d(y_prediction_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
     y_prediction_widen = tf.cast(tf.clip_by_value(y_prediction_widen, 0, 1), tf.int32)
 
-    if tf.reduce_sum(y_prediction) >= tf.reduce_sum(y_true):
-        number_true_positive = tf.reduce_sum(tf.cast((y_true & y_prediction_widen), tf.int32))
-    else:
-        y_true_widen = tf.cast(y_true, tf.float32)
-        y_true_widen = tf.nn.depthwise_conv2d(y_true_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
-        y_true_widen = tf.cast(tf.clip_by_value(y_true_widen, 0, 1), tf.float32)
-        number_true_positive = tf.reduce_sum(tf.cast((y_true_widen & y_prediction), tf.int32))
-    number_false_positive = tf.reduce_sum(y_prediction, axis=(0, 1, 2, 3)) - number_true_positive
+    number_true_positive_1 = tf.reduce_sum(tf.cast((y_true & y_prediction_widen), tf.int32), axis=(0, 1, 2))
+    y_true_widen = tf.cast(y_true, tf.float32)
+    y_true_widen = tf.nn.depthwise_conv2d(y_true_widen, kernel, strides=[1, 1, 1, 1], padding="SAME")
+    y_true_widen = tf.cast(tf.clip_by_value(y_true_widen, 0, 1), tf.int32)
+    number_true_positive_2 = tf.reduce_sum(tf.cast((y_true_widen & y_prediction), tf.int32), axis=(0, 1, 2))
+    number_true_positive = tf.math.minimum(number_true_positive_1, number_true_positive_2)
+    number_false_positive = tf.reduce_sum(y_prediction, axis=(0, 1, 2)) - number_true_positive
 
-    number_true_negative = tf.reduce_sum(tf.cast((1 - y_true) & (1 - y_prediction_widen), tf.int32))
-    number_false_negative = tf.reduce_sum((1 - y_prediction_widen)) - number_true_negative
+    # number_false_negative = tf.reduce_sum((1 - y_prediction_widen) * tf.cast(y_true != y_prediction_widen, tf.int32), axis=(0, 1, 2))
+    # number_true_negative = tf.reduce_sum(1 - y_prediction, axis=(0, 1, 2)) - number_false_negative
+    number_true_negative = tf.reduce_sum(tf.cast((1 - y_prediction) & (1 - y_true), tf.int32), axis=(0, 1, 2))
+    number_false_negative = tf.reduce_sum(tf.cast((1 - y_prediction), tf.int32), axis=(0, 1, 2)) - number_true_negative
 
     return number_true_positive, number_false_positive, number_true_negative, number_false_negative
 
@@ -83,10 +85,10 @@ class F1Edges(tf.keras.metrics.Metric):
         number_true_positive, number_false_positive, number_true_negative, number_false_negative = \
             number_true_false_positive_negative(y_true, y_pred, self.thresholdEdgeWidth)
 
-        self.numberTruePositive.assign_add(tf.cast(number_true_positive, tf.float32))
-        self.numberFalsePositive.assign_add(tf.cast(number_false_positive, tf.float32))
-        self.numberTrueNegative.assign_add(tf.cast(number_true_negative, tf.float32))
-        self.numberFalseNegative.assign_add(tf.cast(number_false_negative, tf.float32))
+        self.numberTruePositive.assign_add(tf.cast(tf.reduce_sum(number_true_positive), tf.float32))
+        self.numberFalsePositive.assign_add(tf.cast(tf.reduce_sum(number_false_positive), tf.float32))
+        self.numberTrueNegative.assign_add(tf.cast(tf.reduce_sum(number_true_negative), tf.float32))
+        self.numberFalseNegative.assign_add(tf.cast(tf.reduce_sum(number_false_negative), tf.float32))
 
     @tf.function
     def result(self):
@@ -104,6 +106,61 @@ class F1Edges(tf.keras.metrics.Metric):
         self.numberFalsePositive.assign(0.0)
         self.numberTrueNegative.assign(0.0)
         self.numberFalseNegative.assign(0.0)
+
+
+class F1EdgesClass(tf.keras.metrics.Metric):
+    def __init__(self, name="f1_edges", threshold_prediction=0, threshold_edge_width=0, **kwargs):
+        super(F1EdgesClass, self).__init__(name=name, **kwargs)
+        self.numberTruePositive = self.add_weight(name="numberTruePositive", initializer="zeros", shape=(3,))
+        self.numberFalsePositive = self.add_weight(name="numberFalsePositive", initializer="zeros", shape=(3,))
+        self.numberTrueNegative = self.add_weight(name="numberTrueNegative", initializer="zeros", shape=(3,))
+        self.numberFalseNegative = self.add_weight(name="numberFalseNegative", initializer="zeros", shape=(3,))
+        self.thresholdPrediction = threshold_prediction
+        self.thresholdEdgeWidth = threshold_edge_width
+
+    @tf.function
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        self.thresholdPrediction = tf.cast(self.thresholdPrediction, y_pred.dtype)
+        y_pred = tf.cast(y_pred > self.thresholdPrediction, tf.int32)
+
+        # reshape y_true: channels = number of classes and binary classification of edge and nonedge
+        y_true = tf.cast(y_true, dtype=tf.int32)
+        class_range = tf.range(1, y_pred.shape[-1] + 1)
+        class_range_reshape = tf.reshape(class_range, [1, 1, 1, y_pred.shape[-1]])
+        y_true = tf.cast(class_range_reshape == y_true, dtype=tf.int32)
+
+        number_true_positive, number_false_positive, number_true_negative, number_false_negative = \
+            number_true_false_positive_negative(y_true, y_pred, self.thresholdEdgeWidth)
+
+        self.numberTruePositive.assign_add(tf.cast(number_true_positive, tf.float32))
+        self.numberFalsePositive.assign_add(tf.cast(number_false_positive, tf.float32))
+        self.numberTrueNegative.assign_add(tf.cast(number_true_negative, tf.float32))
+        self.numberFalseNegative.assign_add(tf.cast(number_false_negative, tf.float32))
+
+    @tf.function
+    def result(self):
+        precision = tf.where(self.numberTruePositive + self.numberFalsePositive != 0,
+                             self.numberTruePositive / (self.numberTruePositive + self.numberFalsePositive), 1)
+        recall = tf.where(self.numberTruePositive + self.numberFalseNegative != 0,
+                          self.numberTruePositive / (self.numberTruePositive + self.numberFalseNegative), 1)
+        f1 = tf.where(precision + recall != 0, 2 * precision * recall / (precision + recall), 0)
+
+        metrics = ["f1", "precision", "recall"]
+        num_class = 3
+        metric_dict = {}
+        for i in range(1, num_class + 1):
+            metric_dict["f1" + "_{}".format(i)] = f1[i - 1]
+            metric_dict["precision" + "_{}".format(i)] = precision[i - 1]
+            metric_dict["recall" + "_{}".format(i)] = recall[i - 1]
+        return metric_dict
+
+    @tf.function
+    def reset_state(self):
+        # The state of the metric will be reset at the start of each epoch.
+        self.numberTruePositive.assign([0.0, 0.0, 0.0])
+        self.numberFalsePositive.assign([0.0, 0.0, 0.0])
+        self.numberTrueNegative.assign([0.0, 0.0, 0.0])
+        self.numberFalseNegative.assign([0.0, 0.0, 0.0])
 
 
 class PrecisionEdges(tf.keras.metrics.Metric):

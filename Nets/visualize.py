@@ -69,7 +69,7 @@ def plot_training_results(res=None, losses=None, metrics=None, res_fine=None, ep
 
 
 def plot_threshold_metrics_evaluation(model, ds, threshold_array, threshold_edge_width, save, path, accuracy_y_lim_min):
-    tf.config.run_functions_eagerly(True)
+    #tf.config.run_functions_eagerly(True)
 
     f1_score = np.zeros(threshold_array.shape)
     precision_score = np.zeros(threshold_array.shape)
@@ -80,23 +80,34 @@ def plot_threshold_metrics_evaluation(model, ds, threshold_array, threshold_edge
 
         threshold_prediction = np.log(threshold_array[i]) - np.log(1 - threshold_array[i])
 
-        f1_evaluation = metrics.F1Edges(threshold_prediction=threshold_prediction,
-                                        threshold_edge_width=threshold_edge_width, )
-        accuracy_evaluation = metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction)
+        model.compile(metrics={'output': [metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction),
+                                          metrics.F1Edges(threshold_prediction=threshold_prediction, threshold_edge_width=threshold_edge_width)]})
 
-        for img, label in ds:
-            img, label = img, label
+        evaluate = model.evaluate(ds, verbose=2)
 
-            prediction = model.predict(img)
-            f1_evaluation.update_state(label, prediction[0])
-            accuracy_evaluation.update_state(label, prediction[0])
+        accuracy_score[i] = evaluate[1]
+        f1_score[i] = evaluate[2]
+        precision_score[i] = evaluate[3]
+        recall_score[i] = evaluate[4]
 
-        f1_score[i] = f1_evaluation.result()["f1"]
-        precision_score[i] = f1_evaluation.result()["precision"]
-        recall_score[i] = f1_evaluation.result()["recall"]
-        accuracy_score[i] = accuracy_evaluation.result()
 
-    tf.config.run_functions_eagerly(False)
+        # f1_evaluation = metrics.F1Edges(threshold_prediction=threshold_prediction,
+        #                                 threshold_edge_width=threshold_edge_width, )
+        #accuracy_evaluation = metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction)
+
+        # for img, label in ds:
+        #     img, label = img, label
+        #
+        #     prediction = model.predict(img)
+        #     f1_evaluation.update_state(label, prediction[0])
+        #     accuracy_evaluation.update_state(label, prediction[0])
+        #
+        # f1_score[i] = f1_evaluation.result()["f1"]
+        # precision_score[i] = f1_evaluation.result()["precision"]
+        # recall_score[i] = f1_evaluation.result()["recall"]
+        # accuracy_score[i] = accuracy_evaluation.result()
+
+    #tf.config.run_functions_eagerly(False)
 
     max_f1_score_idx = np.argmax(f1_score)
     max_f1_score = f1_score[max_f1_score_idx]
@@ -178,6 +189,64 @@ def plot_threshold_metrics_evaluation(model, ds, threshold_array, threshold_edge
     return threshold_array[max_f1_score_idx]
 
 
+def plot_threshold_metrics_evaluation_class(model, num_classes, ds, threshold_array, threshold_edge_width, save, path):
+    # tf.config.run_functions_eagerly(True)
+
+    f1_score = np.zeros((num_classes, threshold_array.shape[0]))
+    precision_score = np.zeros((num_classes, threshold_array.shape[0]))
+    recall_score = np.zeros((num_classes, threshold_array.shape[0]))
+    # accuracy_score = np.zeros(threshold_array.shape)
+
+    for i in range(threshold_array.shape[0]):
+
+        threshold_prediction = np.log(threshold_array[i]) - np.log(1 - threshold_array[i])
+
+        model.compile(metrics={'output': [metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction),
+                                          metrics.F1EdgesClass(threshold_prediction=threshold_prediction,
+                                                               threshold_edge_width=threshold_edge_width)]})
+
+        evaluate = model.evaluate(ds, verbose=2)
+
+        # accuracy_score[i] = evaluate[1]
+        for j in range(num_classes):
+            f1_score[j, i] = evaluate[2 + j]
+            precision_score[j, i] = evaluate[2 + num_classes + j]
+            recall_score[j, i] = evaluate[2 + 2*num_classes + j]
+
+    max_f1_score_idx = np.argmax(f1_score, axis=1)
+    max_f1_score = np.amax(f1_score, axis=1)
+
+    for j in range(num_classes):
+        print("MF_{} = {:.3f}, ODS_{} = {:.3f}".format(j+1, max_f1_score[j], j+1, threshold_array[max_f1_score_idx[j]]))
+    print("MF = {:.3f}".format(np.mean(max_f1_score)))
+
+    # define figure structure
+    fig = plt.figure(figsize=(5*num_classes, 4))
+    title = "MF = {:.3f} ".format(np.mean(max_f1_score))
+    for j in range(num_classes):
+        title = title+"MF_{} = {:.3f}, ODS_{} = {:.3f} ".format(j+1, max_f1_score[j], j+1, threshold_array[max_f1_score_idx[j]])
+
+    fig.suptitle(title)
+    for j in range(num_classes):
+        plot = plt.subplot2grid(shape=(1, num_classes), loc=(0, j))
+        plot.plot(threshold_array, f1_score[j, :], label="F1")
+        plot.plot(threshold_array, precision_score[j, :], label="Precision")
+        plot.plot(threshold_array, recall_score[j, :], label="Recall")
+        plot.legend(loc='lower right')
+        plot.set_xlabel("Threshold")
+        plot.set_title("Class "+str(j))
+        plot.set_ylim([0, 1])
+        plot.set_xlim([0, 1])
+
+    if save:
+        plt.savefig(path, bbox_inches='tight')
+
+    plt.draw()
+
+    ODS = [threshold_array[max_f1_score_idx[0]], threshold_array[max_f1_score_idx[1]], threshold_array[max_f1_score_idx[2]]]
+    return ODS
+
+
 def plot_training_results_old(train_res):
     plt.figure(figsize=(8, 8))
     plt.subplot(2, 1, 1)
@@ -200,15 +269,24 @@ def plot_training_results_old(train_res):
 
 
 def plot_images(images=None, labels=None, predictions=None, save=False, path=None, batch_size=5):
+
+    num_classes = 3
+    class_range = tf.range(1, num_classes+1)
+    class_range_reshape = tf.reshape(class_range, [1, 1, 1, 3])
+    class_range_reshape = tf.cast(class_range_reshape, tf.uint8)
+
     if predictions is None:
         prediction_bool = False
     else:
         prediction_bool = True
+        predictions = tf.cast(predictions, tf.uint8)
+        predictions = tf.cast(class_range_reshape == predictions, dtype=tf.int32) * 255
 
     if labels is None:
         label_bool = False
     else:
         label_bool = True
+        labels = tf.cast(class_range_reshape == labels, dtype=tf.int32)*255
 
     plt.figure(figsize=(batch_size * 5, 16 + prediction_bool * 8))
     for i in range(batch_size):
@@ -219,12 +297,13 @@ def plot_images(images=None, labels=None, predictions=None, save=False, path=Non
         if label_bool:
             plt.subplot(1 + label_bool + prediction_bool, batch_size, batch_size + i + 1)
             plt.title("Ground Truth")
-            plt.imshow(labels[i, :, :, 0], cmap='gray', vmin=0, vmax=3)
+            # plt.imshow(labels[i, :, :, 0], cmap='gray', vmin=0, vmax=
+            plt.imshow(labels[i, :, :, :])
             plt.axis('off')
         if prediction_bool:
             plt.subplot(1 + label_bool + prediction_bool, batch_size, (1 + label_bool) * batch_size + i + 1)
             plt.title("Estimation")
-            plt.imshow(predictions[i, :, :, 0], cmap='gray', vmin=0, vmax=3)
+            plt.imshow(predictions[i, :, :, :])
             plt.axis('off')
 
     if save:
@@ -232,15 +311,3 @@ def plot_images(images=None, labels=None, predictions=None, save=False, path=Non
         plt.savefig(path + ".svg", bbox_inches='tight')
 
     plt.draw()
-
-
-def predict_class_postprocessing(prediction, threshold=0.5):
-    predictions = tf.math.sigmoid(prediction)
-    val_max = tf.reduce_max(predictions, axis=-1)
-    idx_max = tf.argmax(predictions, axis=-1) + 1
-
-    predictions = tf.where(val_max >= threshold, idx_max, 0)
-
-    predictions = tf.expand_dims(predictions, axis=-1)
-
-    return predictions

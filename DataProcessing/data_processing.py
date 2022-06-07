@@ -1,8 +1,11 @@
 import tensorflow as tf
+import tensorflow_addons as tfa
 import os
 import os.path as osp
 from glob import glob
 import shutil
+import numpy as np
+import DataProcessing.spot_light as spot_light
 
 
 def path_definitions(half, model, data, train, test, test_hard=None, img_only=None, model_loaded=None,
@@ -24,7 +27,8 @@ def path_definitions(half, model, data, train, test, test_hard=None, img_only=No
         else osp.join(base_path_model, data_model_loaded, model, 'TFLITE'),
         'FIGURES': osp.join(base_path_model, data, model, 'FIGURES') if data_model_loaded is None
         else osp.join(base_path_model, data_model_loaded, model, 'FIGURES'),
-        'MODEL LOADED': osp.join(base_path_model, data_model_loaded, model_loaded) if type(model_loaded) == str else None,
+        'MODEL LOADED': osp.join(base_path_model, data_model_loaded, model_loaded) if type(
+            model_loaded) == str else None,
         'DATA': {'TRAIN': osp.join(base_path_data, data, train, 'half' * half + (1 - half) * 'full'),
                  'TEST': osp.join(base_path_data, data, test, 'half' * half + (1 - half) * 'full'),
                  'TEST_HARD': osp.join(base_path_data, data, test_hard,
@@ -76,7 +80,6 @@ def path_definitions(half, model, data, train, test, test_hard=None, img_only=No
 
 
 def parse_image(img_path, has_mask):
-
     image = tf.io.read_file(img_path)
     image = tf.image.decode_png(image, channels=3)
     # image = tf.image.convert_image_dtype(image, tf.uint8)
@@ -101,15 +104,18 @@ def parse_image(img_path, has_mask):
 def preprocess(datapoint, height, width, half, has_mask):
     # Preprocessing Layer already added into model Pipeline: model expects input of 0-255, 3 channels
     # datapoint['image'] = tf.cast(datapoint['image'], tf.float32) / 127.5 - 1
-    datapoint['image'] = tf.image.resize(datapoint['image'], (height, width))
+    datapoint['image'] = tf.cast(datapoint['image'], tf.float32)
+    datapoint['image'] = tf.image.resize(datapoint['image'], (height, width), method='nearest')
+    datapoint['image'] = tf.cast(datapoint["image"], tf.uint8)
 
     if has_mask:
         if half:
             mask_size = tf.convert_to_tensor([int(height / 2), int(width / 2)])
         else:
             mask_size = tf.convert_to_tensor([int(height), int(width)])
-
+        datapoint['mask'] = tf.cast(datapoint['mask'], tf.float32)
         datapoint['mask'] = tf.image.resize(datapoint['mask'], mask_size, method='nearest')
+        datapoint['mask'] = tf.cast(datapoint['mask'], tf.uint8)
 
         return {'image': datapoint['image'], 'mask': datapoint['mask']}
 
@@ -118,8 +124,11 @@ def preprocess(datapoint, height, width, half, has_mask):
 
 
 def add_noise(datapoint, noise_std, has_mask):
+    # not sure if necessary to convert from float again back to uint
+    datapoint['image'] = tf.cast(datapoint['image'], tf.float32)
     datapoint['image'] = tf.keras.layers.GaussianNoise(noise_std)(datapoint['image'], training=True)
-
+    datapoint["image"] = tf.clip_by_value(datapoint["image"], 0, 255.0)
+    datapoint['image'] = tf.cast(datapoint['image'], tf.uint8)
     if has_mask:
         return {'image': datapoint['image'], 'mask': datapoint['mask']}
     else:
@@ -142,7 +151,8 @@ def load_dataset(paths, dataset_name, height, width, half, max_img, has_mask=Tru
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
     if noise_std:
-        dataset = dataset.map(lambda x: add_noise(x, noise_std, has_mask), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        dataset = dataset.map(lambda x: add_noise(x, noise_std, has_mask),
+                              num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
     image_count = len(files_filtered)
 
@@ -151,37 +161,76 @@ def load_dataset(paths, dataset_name, height, width, half, max_img, has_mask=Tru
     return dataset, image_count
 
 
-def augment_mapping(datapoint):
-    img = datapoint["image"]
+def value_augmentation_spot_light(shape, value, strength_spot):
 
-    # TODO: what should be used as seed ?
+    shape = shape.numpy()
 
-    rng = tf.random.Generator.from_seed(123, alg='philox')
+    uniform_value_diff = np.random.uniform(-value, value)
+    mask = np.zeros(shape)
+    mask[:, :, 2] = uniform_value_diff
+    strength = np.random.uniform(0.0, strength_spot)
+    mask_raw = spot_light.generate_spot_light_mask(mask_size=(shape[1], shape[0]))
+    mask[:, :, 2] = mask[:, :, 2] + strength * mask_raw
+    mask[:, :, 1] = -strength * mask_raw
+    return mask
+
+
+def augment_mapping(datapoint, rng, aug_param):
+
+    if aug_param["blur"]:
+        sigma = np.random.uniform(0, aug_param["sigma"])
+        datapoint["image"] = tfa.image.gaussian_filter2d(datapoint["image"], (5, 5), sigma)
+
     seed = rng.make_seeds(2)[0]
-    print(seed)
+    datapoint["image"] = tf.image.stateless_random_contrast(datapoint["image"], aug_param["contrast_factor"],
+                                                            1 / aug_param["contrast_factor"], seed)
     seed = rng.make_seeds(2)[0]
-    print(seed)
+    datapoint["image"] = tf.image.stateless_random_brightness(datapoint["image"], aug_param["brightness"], seed)
+
     seed = rng.make_seeds(2)[0]
-    print(seed)
+    datapoint["image"] = tf.image.stateless_random_hue(datapoint["image"], aug_param["hue"], seed)
+    seed = rng.make_seeds(2)[0]
+    datapoint["image"] = tf.image.stateless_random_saturation(datapoint["image"], aug_param["saturation"],
+                                                              1 / aug_param["saturation"], seed)
+    seed = rng.make_seeds(2)[0]
 
-    img = tf.image.stateless_random_brightness(img, 5, seed)
-    img = tf.image.stateless_random_contrast(img, 0.5, 1.5, seed)
-    img = tf.image.stateless_random_hue(img, 0.1, seed)
+    # convert to HSV
+    datapoint["image"] = tf.image.convert_image_dtype(datapoint["image"], tf.float32)
+    datapoint["image"] = tf.image.rgb_to_hsv(datapoint["image"])
 
-    datapoint["image"] = img
+    mask = tf.py_function(value_augmentation_spot_light,
+                          inp=[datapoint["image"].shape, aug_param["value"], aug_param["strength_spot"]], Tout=tf.float32)
+    gaussian_noise = tf.random.stateless_uniform([1], seed, minval=0, maxval=aug_param["gaussian_value"])
+    mask = tf.keras.layers.GaussianNoise(gaussian_noise)(mask, training=True)
+    datapoint["image"] = mask + datapoint["image"]
+    datapoint["image"] = tf.clip_by_value(datapoint["image"], 0.0, 1.0)
+
+    # convert back to RGB of uint8: [0,255]
+    datapoint["image"] = tf.image.hsv_to_rgb(datapoint["image"])
+    datapoint["image"] = tf.image.convert_image_dtype(datapoint["image"], tf.uint8, saturate=True)
+
+    seed = rng.make_seeds(2)[0]
+    datapoint["image"] = tf.image.stateless_random_flip_left_right(datapoint["image"], seed)
+    datapoint["mask"] = tf.image.stateless_random_flip_left_right(datapoint["mask"], seed)
+
+    seed = rng.make_seeds(2)[0]
+    datapoint["image"] = tf.image.stateless_random_flip_up_down(datapoint["image"], seed)
+    datapoint["mask"] = tf.image.stateless_random_flip_up_down(datapoint["mask"], seed)
+
     return {'image': datapoint['image'], 'mask': datapoint['mask']}
 
 
-def dataset_processing(ds, cache=False, shuffle=False, batch_size=False, augment=False, prefetch=False, img_count=0):
+def dataset_processing(ds, cache=False, shuffle=False, batch_size=False, augment=False, prefetch=False, rng=None,
+                       aug_param=None, img_count=0):
     if cache:
         ds = ds.cache()
     if shuffle:
         ds = ds.shuffle(img_count, reshuffle_each_iteration=True)
+    if augment:
+        ds = ds.map(lambda x: augment_mapping(x, rng, aug_param), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds = ds.map(split_dataset_dictionary, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     if batch_size:
         ds = ds.batch(batch_size)
-    if augment:
-        ds = ds.map(augment_mapping, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    ds = ds.map(split_dataset_dictionary, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     if prefetch:
         ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     return ds
