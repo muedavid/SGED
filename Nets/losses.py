@@ -27,7 +27,7 @@ def weighted_multi_label_sigmoid_loss(y_true, y_prediction, beta_lower=0.005, be
     num_non_edge_pixel = num_pixel - num_edge_pixel
     num_non_edge_pixel = tf.cast(num_non_edge_pixel, dtype=dtype)
     beta_tensor = num_non_edge_pixel / num_pixel
-    tf.clip_by_value(beta_tensor, beta_lower, beta_upper)
+    beta_tensor = tf.clip_by_value(beta_tensor, beta_lower, beta_upper)
 
     # Loss
     beta_tensor = tf.cast(beta_tensor, dtype)

@@ -189,7 +189,7 @@ def plot_threshold_metrics_evaluation(model, ds, threshold_array, threshold_edge
     return threshold_array[max_f1_score_idx]
 
 
-def plot_threshold_metrics_evaluation_class(model, num_classes, ds, threshold_array, threshold_edge_width, save, path):
+def plot_threshold_metrics_evaluation_class(model, num_classes, ds, threshold_array, threshold_edge_width, save, path, output_key=None):
     # tf.config.run_functions_eagerly(True)
 
     f1_score = np.zeros((num_classes, threshold_array.shape[0]))
@@ -201,9 +201,13 @@ def plot_threshold_metrics_evaluation_class(model, num_classes, ds, threshold_ar
 
         threshold_prediction = np.log(threshold_array[i]) - np.log(1 - threshold_array[i])
 
-        model.compile(metrics={'output': [metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction),
-                                          metrics.F1EdgesClass(threshold_prediction=threshold_prediction,
-                                                               threshold_edge_width=threshold_edge_width)]})
+        if output_key:
+            model.compile(metrics={output_key: [metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction),
+                                                metrics.F1EdgesClass(threshold_prediction=threshold_prediction,threshold_edge_width=threshold_edge_width)]})
+        else:
+            model.compile(metrics=[metrics.BinaryAccuracyEdges(threshold_prediction=threshold_prediction),
+                                   metrics.F1EdgesClass(threshold_prediction=threshold_prediction, threshold_edge_width=threshold_edge_width)])
+
 
         evaluate = model.evaluate(ds, verbose=2)
 
