@@ -1,4 +1,5 @@
 from tensorflow.keras import layers
+import tensorflow as tf
 
 
 # TODO don't import whole
@@ -82,7 +83,28 @@ def decoder(daspp, side, output_dims, NUM_CLASSES=3, num_side_filters=6):
     return x
 
 
-def shared_concatenation(sides, num_classes):
+# Fails because of additional dimension which is not supported for reshape and transpose operation of Nnapi delegate
+def shared_concatenation_additional_dimension(sides, num_classes):
+    shared_concat = []
+    for j in range(len(sides)):
+        if sides[j].shape[-1] == num_classes:
+            shared_concat.append(sides[j])
+        else:
+            shared_concat.append(tf.repeat(sides[j], num_classes, axis=-1))
+    return layers.Concatenate(axis=-1)(shared_concat)
+
+
+def fused_classification_additional_dimension(x, num_classes, name=None):
+    shape = tf.cast(tf.shape(x), x.dtype)
+    print(shape[1])
+    x = tf.reshape(x, [shape[0], shape[1], shape[2], num_classes, shape[3]/num_classes])
+    x = tf.transpose(x, perm=[0, 1, 2, 4, 3])
+    x = layers.Conv2D(filters=1, kernel_size=1)(x)
+    return tf.squeeze(x, axis=-1, name=name)
+
+
+# does not work fine as grouped convolution is not supported by TFLight
+def shared_concatenation_classic(sides, num_classes):
     shared_concat = []
     for i in range(num_classes):
         for j in range(len(sides)):
@@ -94,5 +116,21 @@ def shared_concatenation(sides, num_classes):
     return layers.Concatenate(axis=-1)(shared_concat)
 
 
-def fused_classification(x, num_classes, name=None):
+def fused_classification_classic(x, num_classes, name=None):
     return layers.Conv2D(filters=num_classes, kernel_size=1, groups=num_classes, name=name)(x)
+
+
+def shared_concatenation_fused_classification(sides, num_classes, name):
+    out = []
+    for i in range(num_classes):
+        shared_concat = []
+        for j in range(len(sides)):
+            if sides[j].shape[-1] == num_classes:
+                shared_concat.append(sides[j][:, :, :, i:i + 1])
+            else:
+                shared_concat.append(sides[j])
+
+        concatenated_layers = layers.Concatenate(axis=-1)(shared_concat)
+        convolved_layers = layers.Conv2D(filters=1, kernel_size=1)(concatenated_layers)
+        out.append(convolved_layers)
+    return layers.Concatenate(axis=-1, name=name)(out)

@@ -79,10 +79,9 @@ def path_definitions(half, model, data, train, test, test_hard=None, img_only=No
     return paths, files
 
 
-def parse_image(img_path, has_mask):
+def parse_image(img_path, has_mask, single_class):
     image = tf.io.read_file(img_path)
     image = tf.image.decode_png(image, channels=3)
-    # image = tf.image.convert_image_dtype(image, tf.uint8)
 
     if has_mask:
         mask_path = tf.strings.regex_replace(img_path, "images", "class_annotation")
@@ -90,35 +89,62 @@ def parse_image(img_path, has_mask):
         # The masks contain a class index for each pixels
         mask = tf.image.decode_png(mask, channels=1)
 
-        # For Ground Truth Check, the images are save with values * 80
-        mask = tf.where(mask == tf.constant(80, tf.uint8), tf.constant(1, tf.uint8), mask)
-        mask = tf.where(mask == tf.constant(160, tf.uint8), tf.constant(2, tf.uint8), mask)
-        mask = tf.where(mask == tf.constant(240, tf.uint8), tf.constant(3, tf.uint8), mask)
-        mask = tf.cast(mask, dtype=tf.uint8)
+        if single_class:
+            mask = tf.where(mask >= tf.constant(80, tf.uint8), tf.constant(1, tf.uint8), mask)
+        else:
+            # For Ground Truth Check, the images are save with values * 80
+            mask = tf.where(mask == tf.constant(80, tf.uint8), tf.constant(1, tf.uint8), mask)
+            mask = tf.where(mask == tf.constant(160, tf.uint8), tf.constant(2, tf.uint8), mask)
+            mask = tf.where(mask == tf.constant(240, tf.uint8), tf.constant(3, tf.uint8), mask)
 
         return {'image': image, 'mask': mask}
     else:
         return {'image': image}
 
 
-def preprocess(datapoint, height, width, half, has_mask):
+def resize_label_map(label, current_shape_label, new_shape_label, num_classes):
+    # label 3D
+    print(label.shape)
+    label = tf.cast(label, tf.int32)
+    label = tf.expand_dims(label, axis=0)
+    class_range = tf.range(1, num_classes + 1)
+    class_range_reshape = tf.reshape(class_range, [1, 1, 1, num_classes])
+    label_re = tf.cast(class_range_reshape == label, dtype=tf.int32)
+    pad = tf.constant([[0, 0], [0, 0], [0, 0], [1, 0]])
+    label_re = tf.pad(label_re, pad, "CONSTANT")
+
+    edge_width_height = int(current_shape_label[0] / new_shape_label[0])
+    edge_width_width = int(current_shape_label[1] / new_shape_label[1])
+    kernel = tf.ones([edge_width_height, edge_width_width, num_classes + 1, 1], tf.float32)
+    label_re = tf.cast(label_re, tf.float32)
+    label_re = tf.nn.depthwise_conv2d(label_re, kernel, strides=[1, 1, 1, 1], padding="SAME")
+    label_re = tf.cast(tf.clip_by_value(label_re, 0, 1), tf.int32)
+
+    label_re = tf.image.resize(label_re, new_shape_label, method='nearest', antialias=True)
+    label_re = tf.math.argmax(label_re, axis=-1, output_type=tf.int32)
+    label = tf.expand_dims(label_re, axis=-1)
+    label = tf.squeeze(label, axis=0)
+    return label
+
+
+def preprocess(datapoint, current_shape, new_shape, num_classes, half, has_mask):
     # Preprocessing Layer already added into model Pipeline: model expects input of 0-255, 3 channels
     # datapoint['image'] = tf.cast(datapoint['image'], tf.float32) / 127.5 - 1
-    datapoint['image'] = tf.cast(datapoint['image'], tf.float32)
-    datapoint['image'] = tf.image.resize(datapoint['image'], (height, width), method='nearest')
+    # datapoint['image'] = tf.cast(datapoint['image'], tf.float32)
+    datapoint['image'] = tf.image.resize(datapoint['image'], new_shape, method='nearest')
     datapoint['image'] = tf.cast(datapoint["image"], tf.uint8)
 
     if has_mask:
         if half:
-            mask_size = tf.convert_to_tensor([int(height / 2), int(width / 2)])
+            datapoint['mask'] = resize_label_map(datapoint['mask'], (int(current_shape[0]/2), int(current_shape[1]/2)), (int(new_shape[0]/2), int(new_shape[1]/2)), num_classes)
         else:
-            mask_size = tf.convert_to_tensor([int(height), int(width)])
-        datapoint['mask'] = tf.cast(datapoint['mask'], tf.float32)
-        datapoint['mask'] = tf.image.resize(datapoint['mask'], mask_size, method='nearest')
+            datapoint['mask'] = resize_label_map(datapoint['mask'], current_shape, (int(new_shape[0] / 2), int(new_shape[1] / 2)), num_classes)
+        # datapoint['mask'] = tf.cast(datapoint['mask'], tf.float32)
+
+        # datapoint['mask'] = tf.image.resize(datapoint['mask'], mask_size, method='nearest')
         datapoint['mask'] = tf.cast(datapoint['mask'], tf.uint8)
 
         return {'image': datapoint['image'], 'mask': datapoint['mask']}
-
     else:
         return {'image': datapoint['image']}
 
@@ -142,12 +168,13 @@ def split_dataset_dictionary(datapoint):
         return datapoint['image']
 
 
-def load_dataset(paths, dataset_name, height, width, half, max_img, has_mask=True, noise_std=None):
+def load_dataset(paths, dataset_name, current_shape, new_shape, num_classes, half, max_img, has_mask=True, noise_std=None, single_class=None):
     files = sorted(glob(osp.join(paths["IMAGE"][dataset_name], "*.png")))
     files_filtered = [x for x in files if int(x[-8:-4]) <= max_img - 1]
     dataset = tf.data.Dataset.from_tensor_slices(files_filtered)
-    dataset = dataset.map(lambda x: parse_image(x, has_mask), num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.map(lambda x: preprocess(x, height, width, half, has_mask),
+    dataset = dataset.map(lambda x: parse_image(x, has_mask, single_class), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    dataset = dataset.map(lambda x: preprocess(x, current_shape, new_shape, num_classes, half, has_mask),
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
     if noise_std:
@@ -180,6 +207,7 @@ def augment_mapping(datapoint, rng, aug_param):
     if aug_param["blur"]:
         sigma = np.random.uniform(0, aug_param["sigma"])
         datapoint["image"] = tfa.image.gaussian_filter2d(datapoint["image"], (5, 5), sigma)
+
 
     seed = rng.make_seeds(2)[0]
     datapoint["image"] = tf.image.stateless_random_contrast(datapoint["image"], aug_param["contrast_factor"],
@@ -219,15 +247,23 @@ def augment_mapping(datapoint, rng, aug_param):
 
     return {'image': datapoint['image'], 'mask': datapoint['mask']}
 
+def normalize_fun(datapoint, has_mask):
+    datapoint['image'] = tf.cast(datapoint['image'], tf.float32)/127.5-1.0
+    if has_mask:
+        return {'image': datapoint['image'], 'mask': datapoint['mask']}
+    else:
+        return {'image': datapoint['image']}
 
 def dataset_processing(ds, cache=False, shuffle=False, batch_size=False, augment=False, prefetch=False, rng=None,
-                       aug_param=None, img_count=0):
+                       aug_param=None, normalize=False, has_mask=True, img_count=0):
     if cache:
         ds = ds.cache()
     if shuffle:
         ds = ds.shuffle(img_count, reshuffle_each_iteration=True)
     if augment:
         ds = ds.map(lambda x: augment_mapping(x, rng, aug_param), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    if normalize:
+        ds = ds.map(lambda x: normalize_fun(x, has_mask), num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds = ds.map(split_dataset_dictionary, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     if batch_size:
         ds = ds.batch(batch_size)
